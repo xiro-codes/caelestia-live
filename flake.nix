@@ -29,7 +29,10 @@
           pkgsWithRust = import inputs.nixpkgs { inherit system overlays; };
           inherit (pkgsWithRust.lib) makeLibraryPath;
 
-          nativeBuildInputs = with pkgsWithRust; [ pkg-config makeWrapper ];
+          nativeBuildInputs = with pkgsWithRust; [
+            pkg-config
+            makeWrapper
+          ];
           buildInputs = with pkgsWithRust; [
             udev
             alsa-lib
@@ -52,7 +55,7 @@
         {
           formatter = pkgs.nixfmt;
           packages.default = pkgsWithRust.rustPlatform.buildRustPackage {
-            pname = "bevy-app";
+            pname = "cosmic-live";
             version = "0.1.0";
             src = ./.;
             cargoLock = {
@@ -62,7 +65,7 @@
             inherit nativeBuildInputs buildInputs;
 
             postInstall = ''
-              wrapProgram $out/bin/bevy-app \
+              wrapProgram $out/bin/cosmic-live \
                 --prefix LD_LIBRARY_PATH : "${makeLibraryPath buildInputs}"
             '';
           };

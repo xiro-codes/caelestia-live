@@ -366,16 +366,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bevy-app"
-version = "0.1.0"
-dependencies = [
- "bevy",
- "bevy_live_wallpaper",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "bevy_a11y"
 version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2163,6 +2153,16 @@ dependencies = [
  "objc2-core-audio",
  "objc2-core-audio-types",
  "objc2-core-foundation",
+]
+
+[[package]]
+name = "cosmic-live"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "bevy_live_wallpaper",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
