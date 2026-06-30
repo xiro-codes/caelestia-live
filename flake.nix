@@ -68,6 +68,7 @@
               wrapProgram $out/bin/cosmic-live \
                 --prefix LD_LIBRARY_PATH : "${makeLibraryPath buildInputs}"
             '';
+            meta.mainProgram = "cosmic-live";
           };
 
           devShells.default = pkgsWithRust.mkShell {
