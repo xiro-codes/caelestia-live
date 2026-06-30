@@ -65,6 +65,7 @@
             inherit nativeBuildInputs buildInputs;
 
             postInstall = ''
+              cp -r assets $out/bin/ || true
               wrapProgram $out/bin/cosmic-live \
                 --prefix LD_LIBRARY_PATH : "${makeLibraryPath buildInputs}"
             '';
