@@ -2,7 +2,7 @@
 
 animated live wallpaper built in Rust using the [Bevy](https://bevyengine.org/) game engine.
 
-!(demo)[./assets/demo.gif]
+![demo](./assets/demo.gif)
 
 ## Features
 
