@@ -316,7 +316,6 @@ struct CloudRotate {
 #[derive(Component)]
 struct SvgStyle {
     color: Option<ThemeColor>,
-    shadow: bool,
 }
 
 fn attach_animations_to_svg(
@@ -334,7 +333,7 @@ fn attach_animations_to_svg(
                     speed: 1.5 + (i % 2.0),
                     phase: i,
                 },
-                SvgStyle { color: Some(ThemeColor::StarWhite), shadow: true },
+                SvgStyle { color: Some(ThemeColor::StarWhite) },
             ));
         } else if id.starts_with("Cloud") {
             let cloud_color = if (i as i32) % 2 == 0 { ThemeColor::PastelPink } else { ThemeColor::VibrantPurple };
@@ -343,14 +342,14 @@ fn attach_animations_to_svg(
                     speed: 0.1 + (i % 0.1),
                     phase: i,
                 },
-                SvgStyle { color: Some(cloud_color), shadow: false },
+                SvgStyle { color: Some(cloud_color) },
             ));
         } else if id == "Logo" {
             commands.entity(entity).insert((
                 PlanetPart {
                     bob_speed: 0.8,
                 },
-                SvgStyle { color: Some(ThemeColor::StarWhite), shadow: true },
+                SvgStyle { color: Some(ThemeColor::StarWhite) },
             ));
         } else if id.starts_with("Wave") {
             let wave_color = match id.as_str() {
@@ -364,7 +363,7 @@ fn attach_animations_to_svg(
                     base_phase: i * 0.5,
                     speed: 0.2 + (i % 0.3),
                 },
-                SvgStyle { color: Some(wave_color), shadow: false },
+                SvgStyle { color: Some(wave_color) },
             ));
         }
         i += 1.0;
@@ -378,14 +377,14 @@ fn propagate_svg_styles(
     mut commands: Commands,
     roots: Query<(Entity, &SvgStyle), Added<SvgStyle>>,
     children_q: Query<&Children>,
-    paths: Query<(&Mesh2d, &MeshMaterial2d<ColorMaterial>)>,
+    paths: Query<&MeshMaterial2d<ColorMaterial>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     colors_res: Res<SchemeColors>,
 ) {
     for (root_entity, style) in roots.iter() {
         let mut queue = vec![root_entity];
         while let Some(entity) = queue.pop() {
-            if let Ok((mesh, mat_handle)) = paths.get(entity) {
+            if let Ok(mat_handle) = paths.get(entity) {
                 if let Some(color_type) = style.color {
                     if let Some(mut mat) = materials.get_mut(&mat_handle.0) {
                         mat.color = colors_res.get(color_type);
@@ -393,19 +392,6 @@ fn propagate_svg_styles(
                     }
                 }
 
-                if style.shadow {
-                    let shadow_mat = materials.add(ColorMaterial::from(Color::srgba(0.0, 0.0, 0.0, 0.5)));
-                    let shadow = commands.spawn((
-                        Mesh2d(mesh.0.clone()),
-                        MeshMaterial2d(shadow_mat),
-                        Transform::from_xyz(10.0, -10.0, -0.1),
-                        GlobalTransform::default(),
-                        Visibility::default(),
-                        InheritedVisibility::default(),
-                        ViewVisibility::default(),
-                    )).id();
-                    commands.entity(entity).add_child(shadow);
-                }
             }
 
             if let Ok(children) = children_q.get(entity) {
