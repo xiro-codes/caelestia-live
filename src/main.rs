@@ -1,15 +1,143 @@
+mod script;
+mod wallpaper;
+
+use bevy::asset::AssetMetaCheck;
 use bevy::prelude::*;
 use clap::Parser;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(
+    name = "caelestia-live",
+    author,
+    version,
+    about = "SVG Live Wallpaper Animation Engine",
+    long_about = None
+)]
 struct Cli {
-    #[arg(short, long)]
+    /// Background name or zip file path (checks ~/.config/caelestia-live/bgs/ by default)
+    #[arg(short = 'b', long = "bg")]
+    bg: Option<String>,
+
+    /// Path to an image to extract an 8-color theme palette from
+    #[arg(short = 'w', long = "wallpaper")]
     wallpaper: Option<String>,
+
+    /// List all available wallpaper packages in ~/.config/caelestia-live/bgs/
+    #[arg(short = 'l', long = "list")]
+    list: bool,
+
+    /// Pack a folder containing bg.svg into ~/.config/caelestia-live/bgs/<name>.zip
+    #[arg(long = "pack")]
+    pack: Option<std::path::PathBuf>,
+
+    /// Install or re-initialize sample caelestia.zip in ~/.config/caelestia-live/bgs/
+    #[arg(long = "install-default")]
+    install_default: bool,
 }
 
 fn main() {
     let cli = Cli::parse();
+    let bgs_dir = wallpaper::get_bgs_dir();
+
+    if cli.list {
+        let bgs = wallpaper::list_wallpapers();
+        println!("Available wallpapers in {:?}:", bgs_dir);
+        if bgs.is_empty() {
+            println!("  (no .zip wallpaper packages found)");
+        } else {
+            for bg in bgs {
+                let stem = bg.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+                println!("  - {}", stem);
+            }
+        }
+        return;
+    }
+
+    if let Some(folder) = &cli.pack {
+        let folder_name = folder
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("wallpaper");
+        let dest = bgs_dir.join(format!("{}.zip", folder_name));
+        match wallpaper::pack_directory_to_zip(folder, &dest) {
+            Ok(()) => {
+                println!(" Successfully packaged {:?} into {:?}", folder, dest);
+            }
+            Err(e) => {
+                eprintln!("❌ Failed to package directory: {}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if cli.install_default {
+        let default_svg = std::path::Path::new("assets/shell.svg");
+        let sample_zip = bgs_dir.join("caelestia.zip");
+        if default_svg.exists() {
+            let svg_bytes = std::fs::read(default_svg).expect("Failed to read assets/shell.svg");
+            let rhai_script = include_bytes!("../templates/default.rhai");
+            if let Err(e) =
+                wallpaper::create_wallpaper_zip(&svg_bytes, Some(rhai_script), &sample_zip)
+            {
+                eprintln!("Failed to install default zip: {}", e);
+                std::process::exit(1);
+            }
+            println!(" Installed sample wallpaper to {:?}", sample_zip);
+        } else {
+            eprintln!("assets/shell.svg not found to create sample wallpaper.");
+        }
+        return;
+    }
+
+    let bgs_dir = wallpaper::get_bgs_dir();
+    let bg_path = match wallpaper::resolve_wallpaper_path(cli.bg.as_deref()) {
+        Ok(path) => path,
+        Err(err) => {
+            let default_svg = std::path::Path::new("assets/shell.svg");
+            let sample_zip = bgs_dir.join("caelestia.zip");
+            if default_svg.exists() {
+                eprintln!(
+                    "No wallpaper package found in {:?}. Initializing sample package 'caelestia.zip'...",
+                    bgs_dir
+                );
+                let svg_bytes =
+                    std::fs::read(default_svg).expect("Failed to read assets/shell.svg");
+                let rhai_script = include_bytes!("../templates/default.rhai");
+                if let Err(e) =
+                    wallpaper::create_wallpaper_zip(&svg_bytes, Some(rhai_script), &sample_zip)
+                {
+                    eprintln!("Failed to create sample zip: {}", e);
+                    std::process::exit(1);
+                }
+                sample_zip
+            } else {
+                eprintln!("Error: {}", err);
+                eprintln!(
+                    "\nTo use caelestia-live, place a wallpaper zip in {:?}:",
+                    bgs_dir
+                );
+                eprintln!("  ~/.config/caelestia-live/bgs/<name>.zip");
+                eprintln!("The zip must contain:");
+                eprintln!("  - bg.svg (required): the SVG artwork");
+                eprintln!("  - main.rhai (optional): Rhai animation script");
+                std::process::exit(1);
+            }
+        }
+    };
+
+    let wallpaper_pkg = match wallpaper::load_wallpaper(&bg_path) {
+        Ok(pkg) => pkg,
+        Err(err) => {
+            eprintln!("Failed to load wallpaper package: {}", err);
+            std::process::exit(1);
+        }
+    };
+
+    println!("🎨 Loaded wallpaper package: {}", wallpaper_pkg.name);
+    if let Some(script) = &wallpaper_pkg.script_path {
+        println!("📜 Using animation script: {:?}", script);
+    }
 
     let mut app = App::new();
 
@@ -40,16 +168,36 @@ fn main() {
         app.insert_resource(ClearColor(colors.bg));
     }
 
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: None,
-            exit_condition: bevy::window::ExitCondition::DontExit,
-            ..default()
-        }))
-        .add_plugins(bevy_live_wallpaper::LiveWallpaperPlugin::default())
-        .add_plugins(bevy_ecs_svg::SvgPlugin)
-        .add_systems(Startup, setup)
-        .add_systems(Update, (animate_scene, attach_animations_to_svg, scale_svg_to_window, propagate_svg_styles, apply_theme_colors))
-        .run();
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: None,
+                exit_condition: bevy::window::ExitCondition::DontExit,
+                ..default()
+            })
+            .set(AssetPlugin {
+                file_path: wallpaper_pkg.extracted_dir.to_string_lossy().to_string(),
+                meta_check: AssetMetaCheck::Never,
+                ..default()
+            }),
+    )
+    .add_plugins(bevy_live_wallpaper::LiveWallpaperPlugin::default())
+    .add_plugins(bevy_ecs_svg::SvgPlugin)
+    .add_plugins(script::ScriptPlugin {
+        script_path: wallpaper_pkg.script_path.clone(),
+    })
+    .add_systems(Startup, setup)
+    .add_systems(
+        Update,
+        (
+            animate_scene,
+            attach_animations_to_svg,
+            scale_svg_to_window,
+            propagate_svg_styles,
+            apply_theme_colors,
+        ),
+    )
+    .run();
 }
 
 #[derive(Component)]
@@ -133,13 +281,23 @@ fn extract_colors_from_wallpaper(path: &str) -> SchemeColors {
             pixels.sort_by(|a, b| {
                 let max_a = a[0].max(a[1]).max(a[2]) as f32;
                 let min_a = a[0].min(a[1]).min(a[2]) as f32;
-                let sat_a = if max_a == 0.0 { 0.0 } else { (max_a - min_a) / max_a };
+                let sat_a = if max_a == 0.0 {
+                    0.0
+                } else {
+                    (max_a - min_a) / max_a
+                };
 
                 let max_b = b[0].max(b[1]).max(b[2]) as f32;
                 let min_b = b[0].min(b[1]).min(b[2]) as f32;
-                let sat_b = if max_b == 0.0 { 0.0 } else { (max_b - min_b) / max_b };
+                let sat_b = if max_b == 0.0 {
+                    0.0
+                } else {
+                    (max_b - min_b) / max_b
+                };
 
-                sat_b.partial_cmp(&sat_a).unwrap_or(std::cmp::Ordering::Equal)
+                sat_b
+                    .partial_cmp(&sat_a)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             });
 
             let mut chosen_colors = Vec::new();
@@ -277,7 +435,7 @@ fn apply_theme_colors(
         for (theme_color, mat_handle) in query.iter() {
             if let Some(mut mat) = materials.get_mut(&mat_handle.0) {
                 let mut new_c = colors.get(theme_color.0);
-                
+
                 // Preserve the alpha if it's currently set (e.g. for twinkling stars)
                 let current_alpha = mat.color.alpha();
                 new_c.set_alpha(current_alpha);
@@ -287,17 +445,13 @@ fn apply_theme_colors(
     }
 }
 
-
-fn setup(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-) {
+fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn((Camera2d, bevy_live_wallpaper::LiveWallpaperCamera));
 
-    // Spawn the SVG
+    // Spawn the SVG from the active wallpaper package
     commands.spawn((
         bevy_ecs_svg::SpawnSvg {
-            document: asset_server.load("shell.svg"),
+            document: asset_server.load("bg.svg"),
         },
         Transform::default(),
         GlobalTransform::default(),
@@ -333,23 +487,31 @@ fn attach_animations_to_svg(
                     speed: 1.5 + (i % 2.0),
                     phase: i,
                 },
-                SvgStyle { color: Some(ThemeColor::StarWhite) },
+                SvgStyle {
+                    color: Some(ThemeColor::StarWhite),
+                },
             ));
         } else if id.starts_with("Cloud") {
-            let cloud_color = if (i as i32) % 2 == 0 { ThemeColor::PastelPink } else { ThemeColor::VibrantPurple };
+            let cloud_color = if (i as i32) % 2 == 0 {
+                ThemeColor::PastelPink
+            } else {
+                ThemeColor::VibrantPurple
+            };
             commands.entity(entity).insert((
                 CloudRotate {
                     speed: 0.1 + (i % 0.1),
                     phase: i,
                 },
-                SvgStyle { color: Some(cloud_color) },
+                SvgStyle {
+                    color: Some(cloud_color),
+                },
             ));
         } else if id == "Logo" {
             commands.entity(entity).insert((
-                PlanetPart {
-                    bob_speed: 0.8,
+                PlanetPart { bob_speed: 0.8 },
+                SvgStyle {
+                    color: Some(ThemeColor::StarWhite),
                 },
-                SvgStyle { color: Some(ThemeColor::StarWhite) },
             ));
         } else if id.starts_with("Wave") {
             let wave_color = match id.as_str() {
@@ -363,7 +525,9 @@ fn attach_animations_to_svg(
                     base_phase: i * 0.5,
                     speed: 0.2 + (i % 0.3),
                 },
-                SvgStyle { color: Some(wave_color) },
+                SvgStyle {
+                    color: Some(wave_color),
+                },
             ));
         }
         i += 1.0;
@@ -391,7 +555,6 @@ fn propagate_svg_styles(
                         commands.entity(entity).insert(ActiveThemeColor(color_type));
                     }
                 }
-
             }
 
             if let Ok(children) = children_q.get(entity) {
@@ -405,10 +568,26 @@ fn propagate_svg_styles(
 
 fn animate_scene(
     time: Res<Time>,
-    mut waves: Query<(&mut Transform, &Wave), (Without<StarTwinkle>, Without<PlanetPart>, Without<CloudRotate>)>,
-    mut stars: Query<(Entity, &mut Transform, &StarTwinkle), (Without<Wave>, Without<PlanetPart>, Without<CloudRotate>)>,
-    mut planets: Query<(&mut Transform, &PlanetPart), (Without<Wave>, Without<StarTwinkle>, Without<CloudRotate>)>,
-    mut clouds: Query<(&mut Transform, &CloudRotate), (Without<Wave>, Without<StarTwinkle>, Without<PlanetPart>)>,
+    mut waves: Query<
+        (&mut Transform, &Wave),
+        (
+            Without<StarTwinkle>,
+            Without<PlanetPart>,
+            Without<CloudRotate>,
+        ),
+    >,
+    mut stars: Query<
+        (Entity, &mut Transform, &StarTwinkle),
+        (Without<Wave>, Without<PlanetPart>, Without<CloudRotate>),
+    >,
+    mut planets: Query<
+        (&mut Transform, &PlanetPart),
+        (Without<Wave>, Without<StarTwinkle>, Without<CloudRotate>),
+    >,
+    mut clouds: Query<
+        (&mut Transform, &CloudRotate),
+        (Without<Wave>, Without<StarTwinkle>, Without<PlanetPart>),
+    >,
     children_q: Query<&Children>,
     paths: Query<&MeshMaterial2d<ColorMaterial>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
@@ -429,7 +608,8 @@ fn animate_scene(
         while let Some(e) = queue.pop() {
             if let Ok(mat_handle) = paths.get(e) {
                 if let Some(mut mat) = materials.get_mut(&mat_handle.0) {
-                    let alpha = star.base_scale * 0.5 + (t * star.speed * 0.4 + star.phase).sin() * 0.5;
+                    let alpha =
+                        star.base_scale * 0.5 + (t * star.speed * 0.4 + star.phase).sin() * 0.5;
                     mat.color.set_alpha(alpha.clamp(0.0, 1.0));
                 }
             }
@@ -439,7 +619,7 @@ fn animate_scene(
                 }
             }
         }
-        
+
         let rotation = (t * star.speed * 0.2 + star.phase).sin() * 0.1;
         let bob = (t * star.speed * 0.3 + star.phase).sin() * 1.5;
         transform.rotation = Quat::from_rotation_z(rotation);
@@ -463,19 +643,35 @@ fn animate_scene(
 
 fn scale_svg_to_window(
     mut query: Query<&mut Transform, With<bevy_ecs_svg::SvgHierarchyLoaded>>,
+    spawn_query: Query<&bevy_ecs_svg::SpawnSvg>,
+    svgs: Res<Assets<bevy_ecs_svg::SvgDocument>>,
     cameras: Query<&Camera, With<Camera2d>>,
 ) {
-    let Some(camera) = cameras.iter().next() else { return };
-    let Some(viewport_size) = camera.logical_viewport_size() else { return };
-    
+    let Some(camera) = cameras.iter().next() else {
+        return;
+    };
+    let Some(viewport_size) = camera.logical_viewport_size() else {
+        return;
+    };
+
     let cam_w = viewport_size.x;
     let cam_h = viewport_size.y;
-    
-    if cam_w == 0.0 || cam_h == 0.0 { return; }
 
-    // shell.svg original size is 5120 x 2160
-    let svg_w = 5120.0;
-    let svg_h = 2160.0;
+    if cam_w == 0.0 || cam_h == 0.0 {
+        return;
+    }
+
+    // Determine SVG dimensions from the loaded SVG asset or fallback
+    let (svg_w, svg_h) = if let Some(spawn) = spawn_query.iter().next() {
+        if let Some(svg_doc) = svgs.get(&spawn.document) {
+            let size = svg_doc.tree.size();
+            (size.width(), size.height())
+        } else {
+            (5120.0, 2160.0)
+        }
+    } else {
+        (5120.0, 2160.0)
+    };
 
     // Stretch to fit the resolution perfectly
     let scale_x = cam_w / svg_w;

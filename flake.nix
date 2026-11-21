@@ -65,11 +65,10 @@
             inherit nativeBuildInputs buildInputs;
 
             postInstall = ''
-              cp -r assets $out/bin/ || true
-              wrapProgram $out/bin/${pname}\
+              wrapProgram $out/bin/${pname} \
                 --prefix LD_LIBRARY_PATH : "${makeLibraryPath buildInputs}"
             '';
-            meta.mainProgram = "cosmic-live";
+            meta.mainProgram = "caelestia-live";
           };
 
           devShells.default = pkgsWithRust.mkShell {
