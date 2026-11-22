@@ -14,6 +14,9 @@ use clap::Parser;
     long_about = None
 )]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<CliCommand>,
+
     /// Background name or zip file path (checks ~/.config/caelestia-live/bgs/ by default)
     #[arg(short = 'b', long = "bg")]
     bg: Option<String>,
@@ -30,16 +33,45 @@ struct Cli {
     #[arg(long = "pack")]
     pack: Option<std::path::PathBuf>,
 
+    /// Output the visual SVG element tree of a wallpaper package
+    #[arg(short = 't', long = "tree")]
+    tree: Option<String>,
+
+    /// Edit a wallpaper script with side-by-side readonly SVG tree, rezipping on save and quit
+    #[arg(short = 'e', long = "edit")]
+    edit: Option<String>,
+
     /// Install or re-initialize sample caelestia.zip in ~/.config/caelestia-live/bgs/
     #[arg(long = "install-default")]
     install_default: bool,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum CliCommand {
+    /// Output the visual SVG element tree of a wallpaper package
+    Tree {
+        /// Wallpaper name or path
+        name: Option<String>,
+    },
+    /// Edit wallpaper script with a side-by-side readonly SVG tree reference, rezipping on save & quit
+    Edit {
+        /// Wallpaper name or path to edit
+        name: Option<String>,
+    },
+    /// List all installed wallpaper packages in ~/.config/caelestia-live/bgs/
+    List,
+    /// Pack a folder containing bg.svg into ~/.config/caelestia-live/bgs/<name>.zip
+    Pack {
+        /// Directory containing bg.svg and optional main.rhai
+        folder: std::path::PathBuf,
+    },
 }
 
 fn main() {
     let cli = Cli::parse();
     let bgs_dir = wallpaper::get_bgs_dir();
 
-    if cli.list {
+    if cli.list || matches!(cli.command, Some(CliCommand::List)) {
         let bgs = wallpaper::list_wallpapers();
         println!("Available wallpapers in {:?}:", bgs_dir);
         if bgs.is_empty() {
@@ -53,13 +85,75 @@ fn main() {
         return;
     }
 
-    if let Some(folder) = &cli.pack {
+    let tree_target = match &cli.command {
+        Some(CliCommand::Tree { name }) => name.clone().or(Some(String::new())),
+        _ => cli.tree,
+    };
+
+    if let Some(target) = tree_target {
+        let target_ref = if target.is_empty() {
+            None
+        } else {
+            Some(target.as_str())
+        };
+        let path = match wallpaper::resolve_wallpaper_path(target_ref) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        match wallpaper::get_wallpaper_svg_tree(&path) {
+            Ok(tree) => {
+                println!("{}", tree);
+            }
+            Err(e) => {
+                eprintln!("Failed to generate SVG tree: {}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    let edit_target = match &cli.command {
+        Some(CliCommand::Edit { name }) => name.clone().or(Some(String::new())),
+        _ => cli.edit,
+    };
+
+    if let Some(target) = edit_target {
+        let target_ref = if target.is_empty() {
+            None
+        } else {
+            Some(target.as_str())
+        };
+        let path = match wallpaper::resolve_wallpaper_path(target_ref) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        if let Err(e) = wallpaper::edit_wallpaper(&path) {
+            eprintln!("Edit failed: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    let pack_folder = match &cli.command {
+        Some(CliCommand::Pack { folder }) => Some(folder.clone()),
+        _ => cli.pack,
+    };
+
+    if let Some(folder) = pack_folder {
         let folder_name = folder
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("wallpaper");
         let dest = bgs_dir.join(format!("{}.zip", folder_name));
-        match wallpaper::pack_directory_to_zip(folder, &dest) {
+        match wallpaper::pack_directory_to_zip(&folder, &dest) {
             Ok(()) => {
                 println!(" Successfully packaged {:?} into {:?}", folder, dest);
             }
@@ -144,13 +238,13 @@ fn main() {
     if let Some(wallpaper_path) = cli.wallpaper {
         let colors = extract_colors_from_wallpaper(&wallpaper_path);
         app.insert_resource(colors.clone());
-        app.insert_resource(ClearColor(colors.bg));
+        app.insert_resource(ClearColor(colors.background));
     } else if let Ok(home) = std::env::var("HOME") {
         let scheme_path = format!("{}/.local/state/caelestia/scheme.json", home);
         let colors = load_scheme_colors(&scheme_path);
 
         app.insert_resource(colors.clone());
-        app.insert_resource(ClearColor(colors.bg));
+        app.insert_resource(ClearColor(colors.background));
 
         app.insert_resource(SchemeWatcher {
             path: scheme_path.clone(),
@@ -165,7 +259,7 @@ fn main() {
         eprintln!("Warning: HOME environment variable not set. Using default colors.");
         let colors = SchemeColors::default();
         app.insert_resource(colors.clone());
-        app.insert_resource(ClearColor(colors.bg));
+        app.insert_resource(ClearColor(colors.background));
     }
 
     app.add_plugins(
@@ -190,8 +284,8 @@ fn main() {
     .add_systems(
         Update,
         (
-            animate_scene,
-            attach_animations_to_svg,
+            // animate_scene,
+            // attach_animations_to_svg,
             scale_svg_to_window,
             propagate_svg_styles,
             apply_theme_colors,
@@ -200,57 +294,42 @@ fn main() {
     .run();
 }
 
-#[derive(Component)]
-struct Wave {
-    base_phase: f32,
-    speed: f32,
-}
-
-#[derive(Component)]
-struct StarTwinkle {
-    base_scale: f32,
-    speed: f32,
-    phase: f32,
-}
-
-#[derive(Component)]
-struct PlanetPart {
-    bob_speed: f32,
-}
 
 #[derive(Resource, Clone)]
 pub struct SchemeColors {
-    bg: Color,
-    deep_violet: Color,
-    royal_blue: Color,
-    pastel_pink: Color,
-    vibrant_purple: Color,
-    indigo: Color,
-    light_purple: Color,
-    star_white: Color,
+    pub background: Color,
+    pub color1: Color,
+    pub color2: Color,
+    pub color3: Color,
+    pub color4: Color,
+    pub color5: Color,
+    pub color6: Color,
+    pub color7: Color,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug,Clone, Copy, PartialEq, Eq)]
 enum ThemeColor {
-    DeepViolet,
-    RoyalBlue,
-    PastelPink,
-    VibrantPurple,
-    Indigo,
-    LightPurple,
-    StarWhite,
+    Background,
+    Color1,
+    Color2,
+    Color3,
+    Color4,
+    Color5,
+    Color6,
+    Color7,
 }
 
 impl SchemeColors {
     fn get(&self, theme: ThemeColor) -> Color {
         match theme {
-            ThemeColor::DeepViolet => self.deep_violet,
-            ThemeColor::RoyalBlue => self.royal_blue,
-            ThemeColor::PastelPink => self.pastel_pink,
-            ThemeColor::VibrantPurple => self.vibrant_purple,
-            ThemeColor::Indigo => self.indigo,
-            ThemeColor::LightPurple => self.light_purple,
-            ThemeColor::StarWhite => self.star_white,
+            ThemeColor::Background => self.background,
+            ThemeColor::Color1 => self.color1,
+            ThemeColor::Color2 => self.color2,
+            ThemeColor::Color3 => self.color3,
+            ThemeColor::Color4 => self.color4,
+            ThemeColor::Color5 => self.color5,
+            ThemeColor::Color6 => self.color6,
+            ThemeColor::Color7 => self.color7,
         }
     }
 }
@@ -258,14 +337,14 @@ impl SchemeColors {
 impl Default for SchemeColors {
     fn default() -> Self {
         Self {
-            bg: Color::srgb(0.05, 0.05, 0.1),
-            deep_violet: Color::srgb(0.1, 0.05, 0.2),
-            royal_blue: Color::srgb(0.1, 0.15, 0.4),
-            pastel_pink: Color::srgb(0.8, 0.5, 0.7),
-            vibrant_purple: Color::srgb(0.4, 0.1, 0.5),
-            indigo: Color::srgb(0.15, 0.1, 0.3),
-            light_purple: Color::srgb(0.5, 0.3, 0.6),
-            star_white: Color::WHITE,
+            background: Color::srgb(0.05, 0.05, 0.1),
+            color1: Color::srgb(0.1, 0.05, 0.2),
+            color2: Color::srgb(0.1, 0.15, 0.4),
+            color3: Color::srgb(0.8, 0.5, 0.7),
+            color4: Color::srgb(0.4, 0.1, 0.5),
+            color5: Color::srgb(0.15, 0.1, 0.3),
+            color6: Color::srgb(0.5, 0.3, 0.6),
+            color7: Color::WHITE,
         }
     }
 }
@@ -337,25 +416,25 @@ fn extract_colors_from_wallpaper(path: &str) -> SchemeColors {
             }
 
             if chosen_colors.len() == 8 {
-                colors.bg = chosen_colors[0];
-                colors.deep_violet = chosen_colors[1];
-                colors.royal_blue = chosen_colors[2];
-                colors.pastel_pink = chosen_colors[3];
-                colors.vibrant_purple = chosen_colors[4];
-                colors.indigo = chosen_colors[5];
-                colors.light_purple = chosen_colors[6];
-                colors.star_white = chosen_colors[7];
+                colors.background = chosen_colors[0];
+                colors.color1 = chosen_colors[1];
+                colors.color2 = chosen_colors[2];
+                colors.color3 = chosen_colors[3];
+                colors.color4 = chosen_colors[4];
+                colors.color5 = chosen_colors[5];
+                colors.color6 = chosen_colors[6];
+                colors.color7 = chosen_colors[7];
             } else {
                 for (i, c) in chosen_colors.iter().enumerate() {
                     match i {
-                        0 => colors.bg = *c,
-                        1 => colors.deep_violet = *c,
-                        2 => colors.royal_blue = *c,
-                        3 => colors.pastel_pink = *c,
-                        4 => colors.vibrant_purple = *c,
-                        5 => colors.indigo = *c,
-                        6 => colors.light_purple = *c,
-                        7 => colors.star_white = *c,
+                        0 => colors.background = *c,
+                        1 => colors.color1 = *c,
+                        2 => colors.color2 = *c,
+                        3 => colors.color3 = *c,
+                        4 => colors.color4 = *c,
+                        5 => colors.color5 = *c,
+                        6 => colors.color6 = *c,
+                        7 => colors.color7 = *c,
                         _ => {}
                     }
                 }
@@ -384,14 +463,14 @@ fn load_scheme_colors(path: &str) -> SchemeColors {
                 fallback
             };
 
-            colors.bg = get_col("crust", colors.bg);
-            colors.deep_violet = get_col("base", colors.deep_violet);
-            colors.royal_blue = get_col("blue", colors.royal_blue);
-            colors.pastel_pink = get_col("pink", colors.pastel_pink);
-            colors.vibrant_purple = get_col("mauve", colors.vibrant_purple);
-            colors.indigo = get_col("sapphire", colors.indigo);
-            colors.light_purple = get_col("lavender", colors.light_purple);
-            colors.star_white = get_col("text", colors.star_white);
+            colors.background = get_col("crust", colors.background);
+            colors.color1 = get_col("base", colors.color1);
+            colors.color2 = get_col("blue", colors.color2);
+            colors.color3 = get_col("pink", colors.color3);
+            colors.color4 = get_col("mauve", colors.color4);
+            colors.color5 = get_col("sapphire", colors.color5);
+            colors.color6 = get_col("lavender", colors.color6);
+            colors.color7 = get_col("text", colors.color7);
         }
     }
 
@@ -418,7 +497,7 @@ fn watch_scheme(
                     watcher.last_modified = modified;
                     let new_colors = load_scheme_colors(&watcher.path);
 
-                    clear_color.0 = new_colors.bg;
+                    clear_color.0 = new_colors.background;
                     *colors_res = new_colors;
                 }
             }
@@ -431,19 +510,19 @@ fn apply_theme_colors(
     mut materials: ResMut<Assets<ColorMaterial>>,
     query: Query<(&ActiveThemeColor, &MeshMaterial2d<ColorMaterial>)>,
 ) {
-    if colors.is_changed() {
-        for (theme_color, mat_handle) in query.iter() {
-            if let Some(mut mat) = materials.get_mut(&mat_handle.0) {
-                let mut new_c = colors.get(theme_color.0);
-
-                // Preserve the alpha if it's currently set (e.g. for twinkling stars)
-                let current_alpha = mat.color.alpha();
-                new_c.set_alpha(current_alpha);
-                mat.color = new_c;
-            }
+    // Always apply theme colours each frame; the SVG renderer may reset material colours.
+    for (theme_color, mat_handle) in query.iter() {
+        if let Some(mut mat) = materials.get_mut(&mat_handle.0) {
+            info!("Applying theme color: {:?}", theme_color.0);
+            let mut new_c = colors.get(theme_color.0);
+            // Preserve existing alpha (e.g., for twinkling stars)
+            let current_alpha = mat.color.alpha();
+            new_c.set_alpha(current_alpha);
+            mat.color = new_c;
         }
     }
 }
+
 
 fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn((Camera2d, bevy_live_wallpaper::LiveWallpaperCamera));
@@ -462,79 +541,12 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
 }
 
 #[derive(Component)]
-struct CloudRotate {
-    speed: f32,
-    phase: f32,
-}
-
-#[derive(Component)]
 struct SvgStyle {
     color: Option<ThemeColor>,
 }
 
-fn attach_animations_to_svg(
-    mut commands: Commands,
-    query: Query<(Entity, &bevy_ecs_svg::SvgNode), Added<bevy_ecs_svg::SvgNode>>,
-) {
-    let mut i = 0.0;
-    for (entity, node) in query.iter() {
-        let id = &node.id;
 
-        if id.starts_with("Star") || id.starts_with("LogoStar") {
-            commands.entity(entity).insert((
-                StarTwinkle {
-                    base_scale: 1.0, // used as base alpha
-                    speed: 1.5 + (i % 2.0),
-                    phase: i,
-                },
-                SvgStyle {
-                    color: Some(ThemeColor::StarWhite),
-                },
-            ));
-        } else if id.starts_with("Cloud") {
-            let cloud_color = if (i as i32) % 2 == 0 {
-                ThemeColor::PastelPink
-            } else {
-                ThemeColor::VibrantPurple
-            };
-            commands.entity(entity).insert((
-                CloudRotate {
-                    speed: 0.1 + (i % 0.1),
-                    phase: i,
-                },
-                SvgStyle {
-                    color: Some(cloud_color),
-                },
-            ));
-        } else if id == "Logo" {
-            commands.entity(entity).insert((
-                PlanetPart { bob_speed: 0.8 },
-                SvgStyle {
-                    color: Some(ThemeColor::StarWhite),
-                },
-            ));
-        } else if id.starts_with("Wave") {
-            let wave_color = match id.as_str() {
-                "Wave1" => ThemeColor::DeepViolet,
-                "Wave2" => ThemeColor::RoyalBlue,
-                "Wave3" => ThemeColor::Indigo,
-                _ => ThemeColor::LightPurple,
-            };
-            commands.entity(entity).insert((
-                Wave {
-                    base_phase: i * 0.5,
-                    speed: 0.2 + (i % 0.3),
-                },
-                SvgStyle {
-                    color: Some(wave_color),
-                },
-            ));
-        }
-        i += 1.0;
-    }
-}
-
-#[derive(Component)]
+#[derive(Component, Debug)]
 struct ActiveThemeColor(ThemeColor);
 
 fn propagate_svg_styles(
@@ -566,80 +578,7 @@ fn propagate_svg_styles(
     }
 }
 
-fn animate_scene(
-    time: Res<Time>,
-    mut waves: Query<
-        (&mut Transform, &Wave),
-        (
-            Without<StarTwinkle>,
-            Without<PlanetPart>,
-            Without<CloudRotate>,
-        ),
-    >,
-    mut stars: Query<
-        (Entity, &mut Transform, &StarTwinkle),
-        (Without<Wave>, Without<PlanetPart>, Without<CloudRotate>),
-    >,
-    mut planets: Query<
-        (&mut Transform, &PlanetPart),
-        (Without<Wave>, Without<StarTwinkle>, Without<CloudRotate>),
-    >,
-    mut clouds: Query<
-        (&mut Transform, &CloudRotate),
-        (Without<Wave>, Without<StarTwinkle>, Without<PlanetPart>),
-    >,
-    children_q: Query<&Children>,
-    paths: Query<&MeshMaterial2d<ColorMaterial>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-) {
-    let t = time.elapsed_secs();
 
-    // Wave should ripple (shift X and Y slightly)
-    for (mut transform, wave) in waves.iter_mut() {
-        let shift_x = (t * wave.speed + wave.base_phase).sin() * 50.0;
-        let shift_y = (t * wave.speed * 1.5 + wave.base_phase).cos() * 15.0;
-        transform.translation.x = shift_x;
-        transform.translation.y = shift_y;
-    }
-
-    // Stars should twinkle (opacity), rotate, and bob
-    for (entity, mut transform, star) in stars.iter_mut() {
-        let mut queue = vec![entity];
-        while let Some(e) = queue.pop() {
-            if let Ok(mat_handle) = paths.get(e) {
-                if let Some(mut mat) = materials.get_mut(&mat_handle.0) {
-                    let alpha =
-                        star.base_scale * 0.5 + (t * star.speed * 0.4 + star.phase).sin() * 0.5;
-                    mat.color.set_alpha(alpha.clamp(0.0, 1.0));
-                }
-            }
-            if let Ok(children) = children_q.get(e) {
-                for child in children.iter() {
-                    queue.push(child);
-                }
-            }
-        }
-
-        let rotation = (t * star.speed * 0.2 + star.phase).sin() * 0.1;
-        let bob = (t * star.speed * 0.3 + star.phase).sin() * 1.5;
-        transform.rotation = Quat::from_rotation_z(rotation);
-        transform.translation.y = bob;
-    }
-
-    // Logo should wobble (bob + rotate)
-    for (mut transform, planet) in planets.iter_mut() {
-        let bob = (t * planet.bob_speed).sin() * 8.0;
-        let wobble = (t * planet.bob_speed * 0.5).sin() * 0.05;
-        transform.translation.y = bob;
-        transform.rotation = Quat::from_rotation_z(wobble);
-    }
-
-    // Clouds should rotate (subtle rotation drift)
-    for (mut transform, cloud) in clouds.iter_mut() {
-        let rotation = (t * cloud.speed + cloud.phase).sin() * 0.02;
-        transform.rotation = Quat::from_rotation_z(rotation);
-    }
-}
 
 fn scale_svg_to_window(
     mut query: Query<&mut Transform, With<bevy_ecs_svg::SvgHierarchyLoaded>>,
